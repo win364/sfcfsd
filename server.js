@@ -58,14 +58,15 @@ function getUserData(userId) {
       const originalUser = JSON.parse(fs.readFileSync(userPath, 'utf8'));
       Store.users.set(userId, {
         ...originalUser,
+        currency: 'RUB', // Force RUB currency
         sessionId: null,
-        balance: originalUser.balance || 1000.00
+        balance: 1000.00 // Set balance to 1000 RUB
       });
     } catch {
       // Default user data
       Store.users.set(userId, {
         language: 'en',
-        currency: 'USD',
+        currency: 'RUB',
         sessionId: null,
         balance: 1000.00,
         name: 'Player',
@@ -183,12 +184,12 @@ function handleApi(req,res){
     
     if(p==='/mines/user'&&m==='GET'){ 
       send(res,200,userData,{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
-      return resolve(true); 
+      return resolve(true);
     }
     
     if(p==='/mines/settings'&&m==='GET'){ 
       send(res,200,Store.settings,{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
-      return resolve(true); 
+      return resolve(true);
     }
     
     if(p==='/mines/sessions'&&m==='GET'){
@@ -210,8 +211,8 @@ function handleApi(req,res){
       readJson(req, body=>{
         const amount=Number(body.amount||0), preset=Number(body.presetValue||3);
         const qb = Store.settings.bets[userData.currency]?.quickBets || { min:1,max:100 };
-        if(amount<qb.min) { send(res,400,{ error:{ type:'smallBid', header:'Rate below the minimum', message:'Rate below the minimum' }},{ 'Content-Type':'application/json' }); return resolve(true);}
-        if(amount>qb.max) { send(res,400,{ error:{ type:'highBid', header:'Rate above the maximum', message:'Rate above the maximum' }},{ 'Content-Type':'application/json' }); return resolve(true);}
+        if(amount<qb.min) { send(res,400,{ error:{ type:'smallBid', header:'Rate below the minimum', message:'Rate below the minimum' }},{ 'Content-Type':'application/json' }); return resolve(true);} 
+        if(amount>qb.max) { send(res,400,{ error:{ type:'highBid', header:'Rate above the maximum', message:'Rate above the maximum' }},{ 'Content-Type':'application/json' }); return resolve(true);} 
         if(amount>userData.balance) { send(res,400,{ error:{ type:'insufficientFunds', header:'Insufficient funds', message:'Insufficient funds' }},{ 'Content-Type':'application/json' }); return resolve(true);}
         if(userData.activeSession) { send(res,400,{ error:{ type:'activeSessionExists', header:'Active session already exists', message:'Active session already exists' }},{ 'Content-Type':'application/json' }); return resolve(true);}
         userData.balance -= amount; 
