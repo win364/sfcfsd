@@ -22,6 +22,8 @@ function readJson(req, cb) {
 const Store = {
   // Individual user sessions - each user gets their own game
   users: new Map(),
+  // SSE clients for real-time balance updates
+  sseClients: new Set(),
   // Global settings (same for all users)
   settings: (() => {
     try {
@@ -122,17 +124,23 @@ function buildSession(amount, presetValue, userData) {
   };
 }
 
-function finishRound(session, click, userData){
-  const key = `${click.col},${click.row}`; const isBomb = session._internal.bombs.has(key);
-  const next = session.lastRound + 1; const coeff = session.gameData.coefficients[Math.max(0,next-1)] || session.coefficient || 0;
+function finishRound(session, click, userData, userId){
+  const key = `${click.col},${click.row}`; 
+  const isBomb = session._internal.bombs.has(key);
+  const next = session.lastRound + 1; 
+  
+  // Add user choice to history
   session.gameData.userChoices.push({ value:{col:click.col,row:click.row}, category: isBomb?1:0 });
-  session.lastRound = next; session.coefficient = isBomb ? session.coefficient : coeff;
+  session.lastRound = next;
   session.gameData.currentRoundId = next;
-  session.gameData.rounds.push({ id: next, amount: session.bet, availableCash: Math.round(session.bet * (isBomb? session.coefficient : coeff)), odd: session.coefficient });
+  
   if (isBomb) { 
+    // BOMB HIT - LOSS
     session.state='Loss'; 
     session.availableCashout=0; 
     session.endDate=new Date().toISOString(); 
+    session.coefficient = session.coefficient || 0; // Keep current coefficient
+    
     // Move finished session to user's history
     if (!userData.history) userData.history = [];
     userData.history.unshift(publicSession(session));
@@ -140,32 +148,79 @@ function finishRound(session, click, userData){
     userData.sessionId = null;
   }
   else { 
+    // SAFE CELL - INCREASE COEFFICIENT
+    const newCoeff = session.gameData.coefficients[next-1] || session.coefficient || 1;
+    session.coefficient = newCoeff;
     session.availableCashout = Math.round(session.bet * session.coefficient); 
-    if (next>=session.gameData.coefficients.length){ 
+    
+    // Add round to game data
+    session.gameData.rounds.push({ 
+      id: next, 
+      amount: session.bet, 
+      availableCash: session.availableCashout, 
+      odd: session.coefficient 
+    });
+    
+    // Check if reached max rounds
+    if (next >= session.gameData.coefficients.length){ 
       session.state='Win'; 
       session.endDate=new Date().toISOString(); 
       if (!session._internal.paid) {
         userData.balance = Math.round((userData.balance + session.availableCashout) * 100) / 100;
         session._internal.paid = true;
+        // Send real-time balance update
+        sendSSEToUser(userId, { type: 'balance_update', balance: userData.balance, currency: userData.currency });
       }
     }
   }
 }
 
-function cashout(userData){ 
+function cashout(userData, userId){ 
   const s=userData.activeSession; 
   if(!s) return;
   if(s.state==='Active'&&s.availableCashout>0){ 
-    userData.balance+=s.availableCashout; 
+    userData.balance = Math.round((userData.balance + s.availableCashout) * 100) / 100; 
     s.state='Win'; 
     s.endDate=new Date().toISOString(); 
+    // Send real-time balance update
+    sendSSEToUser(userId, { type: 'balance_update', balance: userData.balance, currency: userData.currency });
   }
   if (!userData.history) userData.history = [];
   userData.history.unshift(publicSession(s));
   userData.activeSession=null; 
+  userData.sessionId=null;
 }
 
 function publicSession(s){ if(!s) return {}; const {_internal,...rest}=s; return rest; }
+
+// Send SSE message to all connected clients
+function sendSSEToAll(data) {
+  const message = `data: ${JSON.stringify(data)}\n\n`;
+  Store.sseClients.forEach(client => {
+    try {
+      client.write(message);
+    } catch (e) {
+      // Remove disconnected clients
+      Store.sseClients.delete(client);
+    }
+  });
+}
+
+// Send SSE message to specific user
+function sendSSEToUser(userId, data) {
+  const message = `data: ${JSON.stringify(data)}\n\n`;
+  // Find clients for this specific user
+  Store.sseClients.forEach(client => {
+    if (client._userId === userId) {
+      try {
+        client.write(message);
+      } catch (e) {
+        // Remove disconnected clients
+        Store.sseClients.delete(client);
+      }
+    }
+  });
+}
 
 // Get user ID from request (using IP + User-Agent as unique identifier)
 function getUserId(req) {
@@ -187,9 +242,41 @@ function handleApi(req,res){
       return resolve(true);
     }
     
+    if(p==='/mines/balance'&&m==='GET'){ 
+      send(res,200,{ balance: userData.balance, currency: userData.currency },{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
+      return resolve(true);
+    }
+    
+    if(p==='/mines/sse'&&m==='GET'){
+      // Server-Sent Events endpoint for real-time balance updates
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Cache-Control'
+      });
+      
+      // Mark this client with user ID
+      res._userId = userId;
+      
+      // Send initial balance
+      res.write(`data: ${JSON.stringify({ type: 'balance_update', balance: userData.balance, currency: userData.currency })}\n\n`);
+      
+      // Add client to SSE clients set
+      Store.sseClients.add(res);
+      
+      // Remove client when connection closes
+      req.on('close', () => {
+        Store.sseClients.delete(res);
+      });
+      
+      return resolve(true);
+    }
+    
     if(p==='/mines/settings'&&m==='GET'){ 
       send(res,200,Store.settings,{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
-      return resolve(true);
+        return resolve(true);
     }
     
     if(p==='/mines/sessions'&&m==='GET'){
@@ -248,7 +335,7 @@ function handleApi(req,res){
         const dup = userData.activeSession.gameData.userChoices.some(c=>c.value.col===click.col&&c.value.row===click.row);
         if(dup) { send(res,400,{ error:{ type:'duplicateRound', message:'Round with this column and row already exists' }},{ 'Content-Type':'application/json' }); return resolve(true);} 
         const sessionBefore = userData.activeSession;
-        finishRound(userData.activeSession, click, userData);
+        finishRound(userData.activeSession, click, userData, userId);
         
         // If session was finished (bomb hit), return the finished session
         if (!userData.activeSession && sessionBefore) {
@@ -294,9 +381,63 @@ function handleApi(req,res){
     }
     
     if(/^\/mines\/session\//.test(p)&&m==='PUT'){ 
-      cashout(userData); 
+      cashout(userData, userId); 
       send(res,200,userData.history?.[0]||{},{ 'Content-Type':'application/json' }); 
       return resolve(true); 
+    }
+    
+    if(p==='/mines/cashout'&&m==='POST'){
+      if(!userData.activeSession) {
+        send(res,400,{ error:{ type:'noActiveSession', message:'No active session to cashout' }},{ 'Content-Type':'application/json' });
+        return resolve(true);
+      }
+      if(userData.activeSession.availableCashout <= 0) {
+        send(res,400,{ error:{ type:'noCashoutAvailable', message:'No cashout available' }},{ 'Content-Type':'application/json' });
+        return resolve(true);
+      }
+      cashout(userData, userId);
+      send(res,200,{ success: true, balance: userData.balance },{ 'Content-Type':'application/json' });
+      return resolve(true);
+    }
+    
+    if(p==='/mines/debug/state'&&m==='GET'){
+      const debug = {
+        user: userData,
+        activeSession: userData.activeSession ? {
+          id: userData.activeSession.id,
+          state: userData.activeSession.state,
+          coefficient: userData.activeSession.coefficient,
+          availableCashout: userData.activeSession.availableCashout,
+          lastRound: userData.activeSession.lastRound,
+          coefficients: userData.activeSession.gameData?.coefficients,
+          userChoices: userData.activeSession.gameData?.userChoices
+        } : null
+      };
+      send(res,200,debug,{ 'Content-Type':'application/json' });
+      return resolve(true);
+    }
+    
+    if(p==='/mines/debug/topup'&&m==='POST'){
+      readJson(req, body=>{
+        const amount = Number(body.amount||0);
+        const max = 20000;
+        if(!Number.isFinite(amount) || amount<=0){ 
+          send(res,400,{ error:{ type:'badAmount', message:'Amount must be positive number' }},{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
+          return resolve(true);
+        } 
+        if(amount>max){ 
+          send(res,400,{ error:{ type:'tooHigh', message:`Max topup is ${max}` }},{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
+          return resolve(true);
+        } 
+        const before = userData.balance;
+        userData.balance = Math.round((userData.balance + amount)*100)/100;
+        const delta = Math.round((userData.balance - before)*100)/100;
+        send(res,200,{ ok:true, credited: delta, balance: userData.balance, currency: userData.currency },{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' });
+        // Send real-time balance update to this specific user
+        sendSSEToUser(userId, { type: 'balance_update', balance: userData.balance, currency: userData.currency });
+        return resolve(true);
+      });
+      return;
     }
     
     send(res,404,'API endpoint not found');
