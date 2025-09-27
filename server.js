@@ -125,24 +125,17 @@ function buildSession(amount, presetValue, userData) {
 }
 
 function finishRound(session, click, userData, userId){
-  const key = `${click.col},${click.row}`; 
-  const isBomb = session._internal.bombs.has(key);
-  const next = session.lastRound + 1; 
-  const coeff = session.gameData.coefficients[Math.max(0,next-1)] || session.coefficient || 0;
-  
-  // Add user choice to history
+  const key = `${click.col},${click.row}`; const isBomb = session._internal.bombs.has(key);
+  const next = session.lastRound + 1; const coeff = session.gameData.coefficients[Math.max(0,next-1)] || session.coefficient || 0;
   session.gameData.userChoices.push({ value:{col:click.col,row:click.row}, category: isBomb?1:0 });
-  session.lastRound = next;
-  session.coefficient = isBomb ? session.coefficient : coeff;
+  session.lastRound = next; session.coefficient = isBomb ? session.coefficient : coeff;
+  // advance round counters/rounds list
   session.gameData.currentRoundId = next;
   session.gameData.rounds.push({ id: next, amount: session.bet, availableCash: Math.round(session.bet * (isBomb? session.coefficient : coeff)), odd: session.coefficient });
-  
   if (isBomb) { 
-    // BOMB HIT - LOSS
     session.state='Loss'; 
     session.availableCashout=0; 
-    session.endDate=new Date().toISOString();
-    
+    session.endDate=new Date().toISOString(); 
     // Move finished session to user's history
     if (!userData.history) userData.history = [];
     userData.history.unshift(publicSession(session));
@@ -150,32 +143,30 @@ function finishRound(session, click, userData, userId){
     userData.sessionId = null;
   }
   else { 
-    // SAFE CELL - UPDATE AVAILABLE CASHOUT
-    session.availableCashout = Math.round(session.bet * session.coefficient);
-    
-    // Check if reached max rounds (auto-win)
-    if (next >= session.gameData.coefficients.length){ 
+    session.availableCashout = Math.round(session.bet * session.coefficient); 
+    if (next>=session.gameData.coefficients.length){ 
       session.state='Win'; 
       session.endDate=new Date().toISOString(); 
+      // Auto-credit balance for full win (all fields opened)
       if (!session._internal.paid) {
         userData.balance = Math.round((userData.balance + session.availableCashout) * 100) / 100;
         session._internal.paid = true;
         // Send real-time balance update
-        sendSSEToUser(userId, { type: 'balance_update', balance: userData.balance, currency: userData.currency });
+        sendSSEToAll({ type: 'balance_update', balance: userData.balance, currency: userData.currency });
       }
-    }
+    } 
   }
 }
 
 function cashout(userData, userId){ 
   const s=userData.activeSession; 
-  if(!s) return;
+  if(!s) return; 
   if(s.state==='Active'&&s.availableCashout>0){ 
     userData.balance = Math.round((userData.balance + s.availableCashout) * 100) / 100; 
     s.state='Win'; 
     s.endDate=new Date().toISOString(); 
     // Send real-time balance update
-    sendSSEToUser(userId, { type: 'balance_update', balance: userData.balance, currency: userData.currency });
+    sendSSEToAll({ type: 'balance_update', balance: userData.balance, currency: userData.currency });
   }
   if (!userData.history) userData.history = [];
   userData.history.unshift(publicSession(s));
@@ -247,7 +238,7 @@ function handleApi(req,res){
     if(p==='/mines/user'&&m==='GET'){ 
       archiveAndClearIfFinished(userData);
       send(res,200,userData,{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
-      return resolve(true); 
+      return resolve(true);
     }
     
     if(p==='/mines/balance'&&m==='GET'){ 
@@ -317,8 +308,8 @@ function handleApi(req,res){
           userData.sessionId = null;
         }
         
-        if(amount<qb.min) { send(res,400,{ error:{ type:'smallBid', header:'Rate below the minimum', message:'Rate below the minimum' }},{ 'Content-Type':'application/json' }); return resolve(true);}
-        if(amount>qb.max) { send(res,400,{ error:{ type:'highBid', header:'Rate above the maximum', message:'Rate above the maximum' }},{ 'Content-Type':'application/json' }); return resolve(true);}
+        if(amount<qb.min) { send(res,400,{ error:{ type:'smallBid', header:'Rate below the minimum', message:'Rate below the minimum' }},{ 'Content-Type':'application/json' }); return resolve(true);} 
+        if(amount>qb.max) { send(res,400,{ error:{ type:'highBid', header:'Rate above the maximum', message:'Rate above the maximum' }},{ 'Content-Type':'application/json' }); return resolve(true);} 
         if(amount>userData.balance) { send(res,400,{ error:{ type:'insufficientFunds', header:'Insufficient funds', message:'Insufficient funds' }},{ 'Content-Type':'application/json' }); return resolve(true);}
         if(userData.activeSession) { send(res,400,{ error:{ type:'activeSessionExists', header:'Active session already exists', message:'Active session already exists' }},{ 'Content-Type':'application/json' }); return resolve(true);}
         userData.balance -= amount; 
