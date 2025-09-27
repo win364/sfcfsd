@@ -128,18 +128,20 @@ function finishRound(session, click, userData, userId){
   const key = `${click.col},${click.row}`; 
   const isBomb = session._internal.bombs.has(key);
   const next = session.lastRound + 1; 
+  const coeff = session.gameData.coefficients[Math.max(0,next-1)] || session.coefficient || 0;
   
   // Add user choice to history
   session.gameData.userChoices.push({ value:{col:click.col,row:click.row}, category: isBomb?1:0 });
   session.lastRound = next;
+  session.coefficient = isBomb ? session.coefficient : coeff;
   session.gameData.currentRoundId = next;
+  session.gameData.rounds.push({ id: next, amount: session.bet, availableCash: Math.round(session.bet * (isBomb? session.coefficient : coeff)), odd: session.coefficient });
   
   if (isBomb) { 
     // BOMB HIT - LOSS
     session.state='Loss'; 
     session.availableCashout=0; 
-    session.endDate=new Date().toISOString(); 
-    session.coefficient = session.coefficient || 0; // Keep current coefficient
+    session.endDate=new Date().toISOString();
     
     // Move finished session to user's history
     if (!userData.history) userData.history = [];
@@ -148,20 +150,10 @@ function finishRound(session, click, userData, userId){
     userData.sessionId = null;
   }
   else { 
-    // SAFE CELL - INCREASE COEFFICIENT
-    const newCoeff = session.gameData.coefficients[next-1] || session.coefficient || 1;
-    session.coefficient = newCoeff;
-    session.availableCashout = Math.round(session.bet * session.coefficient); 
+    // SAFE CELL - UPDATE AVAILABLE CASHOUT
+    session.availableCashout = Math.round(session.bet * session.coefficient);
     
-    // Add round to game data
-    session.gameData.rounds.push({ 
-      id: next, 
-      amount: session.bet, 
-      availableCash: session.availableCashout, 
-      odd: session.coefficient 
-    });
-    
-    // Check if reached max rounds
+    // Check if reached max rounds (auto-win)
     if (next >= session.gameData.coefficients.length){ 
       session.state='Win'; 
       session.endDate=new Date().toISOString(); 
@@ -229,6 +221,21 @@ function getUserId(req) {
   return crypto.createHash('md5').update(ip + userAgent).digest('hex').substring(0, 8);
 }
 
+// Move a finished (non-Active) session to history and clear references,
+// so a page reload does not resurrect the previous game.
+function archiveAndClearIfFinished(userData){
+  const s = userData.activeSession;
+  if (!s) return;
+  if (s.state && s.state !== 'Active') {
+    const ended = publicSession(s);
+    if (!userData.history.find(h => h.id === ended.id)) {
+      userData.history.unshift(ended);
+    }
+    userData.activeSession = null;
+    userData.sessionId = null;
+  }
+}
+
 // -------- API handler --------
 function handleApi(req,res){
   return new Promise((resolve) => {
@@ -238,8 +245,9 @@ function handleApi(req,res){
     const userData = getUserData(userId);
     
     if(p==='/mines/user'&&m==='GET'){ 
+      archiveAndClearIfFinished(userData);
       send(res,200,userData,{ 'Content-Type':'application/json', 'Access-Control-Allow-Origin':'*' }); 
-      return resolve(true);
+      return resolve(true); 
     }
     
     if(p==='/mines/balance'&&m==='GET'){ 
@@ -298,8 +306,19 @@ function handleApi(req,res){
       readJson(req, body=>{
         const amount=Number(body.amount||0), preset=Number(body.presetValue||3);
         const qb = Store.settings.bets[userData.currency]?.quickBets || { min:1,max:100 };
-        if(amount<qb.min) { send(res,400,{ error:{ type:'smallBid', header:'Rate below the minimum', message:'Rate below the minimum' }},{ 'Content-Type':'application/json' }); return resolve(true);} 
-        if(amount>qb.max) { send(res,400,{ error:{ type:'highBid', header:'Rate above the maximum', message:'Rate above the maximum' }},{ 'Content-Type':'application/json' }); return resolve(true);} 
+        
+        // If there is a finished session lingering (Loss/Win), archive and clear it to allow new game
+        if (userData.activeSession && userData.activeSession.state !== 'Active') {
+          const ended = publicSession(userData.activeSession);
+          if (!userData.history.find(s=>s.id===ended.id)) { 
+            userData.history.unshift(ended); 
+          }
+          userData.activeSession = null;
+          userData.sessionId = null;
+        }
+        
+        if(amount<qb.min) { send(res,400,{ error:{ type:'smallBid', header:'Rate below the minimum', message:'Rate below the minimum' }},{ 'Content-Type':'application/json' }); return resolve(true);}
+        if(amount>qb.max) { send(res,400,{ error:{ type:'highBid', header:'Rate above the maximum', message:'Rate above the maximum' }},{ 'Content-Type':'application/json' }); return resolve(true);}
         if(amount>userData.balance) { send(res,400,{ error:{ type:'insufficientFunds', header:'Insufficient funds', message:'Insufficient funds' }},{ 'Content-Type':'application/json' }); return resolve(true);}
         if(userData.activeSession) { send(res,400,{ error:{ type:'activeSessionExists', header:'Active session already exists', message:'Active session already exists' }},{ 'Content-Type':'application/json' }); return resolve(true);}
         userData.balance -= amount; 
